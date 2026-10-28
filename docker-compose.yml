@@ -1,0 +1,50 @@
+services:
+  mock-llm:
+    build: ./services/mock-llm
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://127.0.0.1:8088/health"]
+      interval: 2s
+      timeout: 2s
+      retries: 20
+
+  web:
+    build:
+      context: .
+      dockerfile: apps/web/Dockerfile
+    environment:
+      AI_BASE_URL: ${AI_BASE_URL:-http://mock-llm:8088/v1}
+      AI_MODEL: ${AI_MODEL:-demo}
+      AI_API_KEY: ${AI_API_KEY:-unused}
+    ports:
+      - "3000:3000"
+    depends_on:
+      mock-llm:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://127.0.0.1:3000/api/health"]
+      interval: 2s
+      timeout: 3s
+      retries: 40
+      start_period: 15s
+
+  envoy-broken:
+    image: envoyproxy/envoy:v1.34-latest
+    command: ["-c", "/etc/envoy/envoy.yaml", "--log-level", "info"]
+    volumes:
+      - ./envoy/envoy.broken.yaml:/etc/envoy/envoy.yaml:ro
+    ports:
+      - "8080:8080"
+    depends_on:
+      web:
+        condition: service_healthy
+
+  envoy-fixed:
+    image: envoyproxy/envoy:v1.34-latest
+    command: ["-c", "/etc/envoy/envoy.yaml", "--log-level", "info"]
+    volumes:
+      - ./envoy/envoy.fixed.yaml:/etc/envoy/envoy.yaml:ro
+    ports:
+      - "8081:8080"
+    depends_on:
+      web:
+        condition: service_healthy
