@@ -29,15 +29,15 @@ function modeForPort(port: string): Mode {
 const modeCopy: Record<Mode, { title: string; body: string }> = {
   direct: {
     title: "Direct to Next.js",
-    body: "No Envoy on this hop. Waiting for server response stays small, then the content downloads for about 25 seconds as tokens arrive.",
+    body: "No Envoy on this hop. Waiting for server response stays small, then the content downloads while tokens arrive.",
   },
   broken: {
-    title: "Broken Envoy — response buffered",
-    body: "Envoy holds the reply until it is finished. Waiting for server response lasts about 25 seconds, then the content download is immediate and the whole reply appears at once.",
+    title: "Broken Envoy — buffers 16KB, then streams",
+    body: "Envoy holds the reply until 16KB has arrived, then streams the rest. Waiting for server response lasts until that 16KB is ready. Content download is the remainder of the stream.",
   },
   fixed: {
     title: "Fixed Envoy — response streamed",
-    body: "Envoy forwards each chunk. Waiting for server response stays small, and the content download lasts about 25 seconds.",
+    body: "Envoy forwards each chunk. Waiting for server response stays small, and the content download lasts while tokens arrive.",
   },
 };
 
@@ -205,7 +205,7 @@ export default function HomePage() {
         </button>
       </form>
       <p className="note">
-        The bundled mock ignores the message and streams for about 25 seconds.
+        The bundled mock ignores the message and streams a 100KB reply.
         Set AI_BASE_URL, AI_MODEL, and AI_API_KEY to call your own endpoint.
         Open the chat request in DevTools to compare Waiting for server response
         with Content download.

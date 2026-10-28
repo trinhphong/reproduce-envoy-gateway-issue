@@ -7,6 +7,30 @@ services:
       timeout: 2s
       retries: 20
 
+  ollama:
+    image: ollama/ollama:latest
+    volumes:
+      - ollama:/root/.ollama
+    ports:
+      - "11436:11434"
+    healthcheck:
+      test: ["CMD", "ollama", "list"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+      start_period: 5s
+
+  ollama-pull:
+    image: ollama/ollama:latest
+    environment:
+      OLLAMA_HOST: http://ollama:11434
+      OLLAMA_MODEL: ${AI_MODEL:-llama3.2:1b}
+    entrypoint: ["sh", "-c", "ollama pull \"$$OLLAMA_MODEL\""]
+    depends_on:
+      ollama:
+        condition: service_healthy
+    restart: "no"
+
   web:
     build:
       context: .
@@ -20,12 +44,28 @@ services:
     depends_on:
       mock-llm:
         condition: service_healthy
+      ollama-pull:
+        condition: service_completed_successfully
     healthcheck:
       test: ["CMD", "wget", "-qO-", "http://127.0.0.1:3000/api/health"]
       interval: 2s
       timeout: 3s
       retries: 40
       start_period: 15s
+
+  ext-proc:
+    build: ./services/ext-proc
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "node",
+          "-e",
+          "require('net').connect(9000,'127.0.0.1').on('connect',()=>process.exit(0)).on('error',()=>process.exit(1))",
+        ]
+      interval: 2s
+      timeout: 2s
+      retries: 20
 
   envoy-broken:
     image: envoyproxy/envoy:v1.34-latest
@@ -36,6 +76,8 @@ services:
       - "8080:8080"
     depends_on:
       web:
+        condition: service_healthy
+      ext-proc:
         condition: service_healthy
 
   envoy-fixed:
@@ -48,3 +90,6 @@ services:
     depends_on:
       web:
         condition: service_healthy
+
+volumes:
+  ollama:
