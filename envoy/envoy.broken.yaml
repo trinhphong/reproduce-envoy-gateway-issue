@@ -1,7 +1,7 @@
-# Buffers the upstream response and only then sends headers downstream.
-# DevTools shows a long "Waiting for server response", then a short
-# "Content download". The route timeout is disabled so the stream is
-# not reset while it is being buffered.
+# Holds upstream response bytes until 16KB is buffered, or until the
+# stream ends when the body stays smaller than that. A short SSE reply
+# therefore stays hidden for the whole generation. The route timeout is
+# disabled so the stream is not reset while it is being held.
 static_resources:
   listeners:
     - name: listener_0
@@ -38,9 +38,25 @@ static_resources:
                       default_source_code:
                         inline_string: |
                           function envoy_on_response(response_handle)
-                            -- Yield until the upstream body is complete. Headers stay
-                            -- unsent downstream until this returns.
-                            response_handle:body()
+                            local limit = 16384
+                            local held = ""
+                            local released = false
+                            local last = nil
+                            for chunk in response_handle:bodyChunks() do
+                              last = chunk
+                              if not released then
+                                held = held .. chunk:getBytes(0, chunk:length())
+                                if #held >= limit then
+                                  chunk:setBytes(held)
+                                  released = true
+                                else
+                                  chunk:setBytes("")
+                                end
+                              end
+                            end
+                            if not released and last ~= nil then
+                              last:setBytes(held)
+                            end
                           end
                   - name: envoy.filters.http.router
                     typed_config:

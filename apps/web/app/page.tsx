@@ -1,21 +1,19 @@
 "use client";
 
-import { createTRPCClient, httpBatchStreamLink } from "@trpc/client";
+import { createTRPCClient, httpSubscriptionLink } from "@trpc/client";
 import { useEffect, useState, type FormEvent } from "react";
 import type { AppRouter } from "@/server/router";
 
 type Mode = "direct" | "broken" | "fixed";
 
 type Timings = {
-  waitingMs: number | null;
-  downloadMs: number | null;
+  firstTokenMs: number | null;
   elapsedMs: number | null;
   chunks: number;
 };
 
 const emptyTimings: Timings = {
-  waitingMs: null,
-  downloadMs: null,
+  firstTokenMs: null,
   elapsedMs: null,
   chunks: 0,
 };
@@ -29,15 +27,15 @@ function modeForPort(port: string): Mode {
 const modeCopy: Record<Mode, { title: string; body: string }> = {
   direct: {
     title: "Direct to Next.js",
-    body: "No Envoy on this hop. Waiting for server response stays small, then the content downloads for about 25 seconds as tokens arrive.",
+    body: "One SSE stream. The server writes a 16KB comment first, then each token as an event. The first token arrives in about half a second, and events continue for about 25 seconds.",
   },
   broken: {
-    title: "Broken Envoy — response buffered",
-    body: "Envoy holds the reply until it is finished. Waiting for server response lasts about 25 seconds, then the content download is immediate and the whole reply appears at once.",
+    title: "Broken Envoy — 16KB flush",
+    body: "Envoy holds the response until 16KB has arrived. The opening SSE comment fills that buffer, so the first token arrives in about half a second and events continue for about 25 seconds.",
   },
   fixed: {
-    title: "Fixed Envoy — response streamed",
-    body: "Envoy forwards each chunk. Waiting for server response stays small, and the content download lasts about 25 seconds.",
+    title: "Fixed Envoy — SSE forwarded",
+    body: "Same SSE stream. Envoy forwards each chunk. The first token arrives in about half a second, and events continue for about 25 seconds.",
   },
 };
 
@@ -86,62 +84,52 @@ export default function HomePage() {
 
     const client = createTRPCClient<AppRouter>({
       links: [
-        httpBatchStreamLink({
+        httpSubscriptionLink({
           url: `${window.location.origin}/api/trpc`,
-          fetch: async (input, init) => {
-            const response = await fetch(input, init);
-            setTimings((current) => ({
-              ...current,
-              waitingMs: Math.round(performance.now() - started),
-            }));
-            return response;
-          },
         }),
       ],
     });
 
     try {
-      const stream = await client.chat.mutate({ message });
-      let chunks = 0;
-      for await (const delta of stream) {
-        chunks += 1;
-        const now = Math.round(performance.now() - started);
-        setAssistant((current) => current + delta);
-        setTimings((current) => ({
-          ...current,
-          elapsedMs: now,
-          chunks,
-        }));
-      }
-      const end = Math.round(performance.now() - started);
+      await new Promise<void>((resolve, reject) => {
+        client.chat.subscribe(
+          { message },
+          {
+            onData(delta) {
+              if (typeof delta !== "string" || delta.length === 0) return;
+              const now = Math.round(performance.now() - started);
+              setAssistant((current) => current + delta);
+              setTimings((current) => ({
+                ...current,
+                elapsedMs: now,
+                firstTokenMs: current.firstTokenMs ?? now,
+                chunks: current.chunks + 1,
+              }));
+            },
+            onError(cause) {
+              reject(cause);
+            },
+            onComplete() {
+              resolve();
+            },
+          },
+        );
+      });
       setTimings((current) => ({
         ...current,
-        elapsedMs: end,
-        downloadMs:
-          current.waitingMs === null ? null : Math.max(0, end - current.waitingMs),
+        elapsedMs: Math.round(performance.now() - started),
       }));
     } catch (cause) {
       const text = cause instanceof Error ? cause.message : String(cause);
-      const end = Math.round(performance.now() - started);
       setError(text);
       setTimings((current) => ({
         ...current,
-        elapsedMs: end,
-        downloadMs:
-          current.waitingMs === null ? null : Math.max(0, end - current.waitingMs),
+        elapsedMs: Math.round(performance.now() - started),
       }));
     } finally {
       setPending(false);
     }
   }
-
-  const waitingMs =
-    timings.waitingMs ?? (pending ? timings.elapsedMs : null);
-  const downloadMs =
-    timings.downloadMs ??
-    (timings.waitingMs === null || timings.elapsedMs === null
-      ? null
-      : Math.max(0, timings.elapsedMs - timings.waitingMs));
 
   const copy = modeCopy[mode];
 
@@ -149,9 +137,9 @@ export default function HomePage() {
     <main>
       <h1>Streaming chat</h1>
       <p className="lede">
-        The browser calls tRPC. tRPC calls an OpenAI-compatible model with the
-        AI SDK and yields each text delta. {origin || "This page"} is the hop
-        under test.
+        The browser opens one SSE stream. The first bytes are a 16KB comment so
+        a gateway that waits for 16KB can flush, then each token arrives as an
+        event. {origin || "This page"} is the hop under test.
       </p>
 
       <section className={`banner ${mode}`}>
@@ -161,12 +149,12 @@ export default function HomePage() {
 
       <ul className="stats">
         <li>
-          <span>Waiting for server response</span>
-          <strong>{formatMs(waitingMs)}</strong>
+          <span>Time to first token</span>
+          <strong>{formatMs(timings.firstTokenMs)}</strong>
         </li>
         <li>
-          <span>Content download</span>
-          <strong>{formatMs(downloadMs)}</strong>
+          <span>Elapsed</span>
+          <strong>{formatMs(timings.elapsedMs)}</strong>
         </li>
         <li>
           <span>Chunks</span>
@@ -201,14 +189,14 @@ export default function HomePage() {
           disabled={pending}
         />
         <button type="submit" disabled={pending || draft.trim().length === 0}>
-          {pending ? (timings.waitingMs === null ? "Waiting" : "Receiving") : "Send"}
+          {pending ? (timings.firstTokenMs === null ? "Waiting" : "Receiving") : "Send"}
         </button>
       </form>
       <p className="note">
-        The bundled mock ignores the message and streams for about 25 seconds.
-        Set AI_BASE_URL, AI_MODEL, and AI_API_KEY to call your own endpoint.
-        Open the chat request in DevTools to compare Waiting for server response
-        with Content download.
+        The bundled mock ignores the message and emits one token about every
+        500 milliseconds for about 25 seconds. The opening comment is at least
+        16KB so Envoy can leave its buffer and forward the events. Set
+        AI_BASE_URL, AI_MODEL, and AI_API_KEY to call your own endpoint.
       </p>
     </main>
   );
